@@ -76,7 +76,7 @@ def query_file_search_store(client, store_name, query):
     """Asks a question about the file store and returns the response."""
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash", # <-- *** THIS LINE IS NOW CORRECTED ***
+            model="gemini-2.5-flash", # Use a supported model
             contents=[query],
             config=types.GenerateContentConfig(
                 tools=[
@@ -193,9 +193,13 @@ with tab1:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if "citations" in message:
-                with st.expander("Show Sources"):
+                with st.expander("Show Sources (from your documents)"):
                     for citation in message["citations"]:
                         st.info(f"**From '{citation['file_name']}' (Snippet):**\n\n> {citation['snippet']}")
+            # Add this check for older messages that might not have citations
+            elif message["role"] == "assistant" and "citations" not in message:
+                st.caption("ℹ️ This response was based on the model's general knowledge.")
+
 
     # The chat input bar
     if prompt := st.chat_input("Ask a question based *only* on the uploaded documents..."):
@@ -217,7 +221,7 @@ with tab1:
                         response_text = response.text
                         citations = []
                         
-                        # **NEW: Add Citations**
+                        # --- 1. Check for and extract citations ---
                         try:
                             grounding_meta = response.candidates[0].grounding_metadata
                             if grounding_meta.search_quotes:
@@ -229,11 +233,12 @@ with tab1:
                         except (AttributeError, IndexError):
                             pass # No citations found
 
+                        # --- 2. Display the response ---
                         st.markdown(response_text)
                         
-                        # Display citations if they exist
+                        # --- 3. Display sources OR a general knowledge notice ---
                         if citations:
-                            with st.expander("Show Sources"):
+                            with st.expander("Show Sources (from your documents)"):
                                 for citation in citations:
                                     st.info(f"**From '{citation['file_name']}' (Snippet):**\n\n> {citation['snippet']}")
                             # Add to session state
@@ -243,6 +248,7 @@ with tab1:
                                 "citations": citations
                             })
                         else:
+                            st.caption("ℹ️ This response is based on the model's general knowledge.")
                             st.session_state.messages.append({
                                 "role": "assistant", 
                                 "content": response_text
