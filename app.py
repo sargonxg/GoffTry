@@ -76,7 +76,7 @@ def query_file_search_store(client, store_name, query):
     """Asks a question about the file store and returns the response."""
     try:
         response = client.models.generate_content(
-            model="gemini-1.5-flash", # Use a supported model
+            model="gemini-2.5-flash", # <-- *** THIS LINE IS NOW CORRECTED ***
             contents=[query],
             config=types.GenerateContentConfig(
                 tools=[
