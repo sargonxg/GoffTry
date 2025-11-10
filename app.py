@@ -5,7 +5,9 @@ import time
 import os
 import tempfile
 import pandas as pd
-import random # Used for dummy analytics data
+import json # For parsing the model's analytics response
+import plotly.express as px # For the map
+import country_converter as coco # To get country codes for the map
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -20,16 +22,12 @@ st.set_page_config(
 def get_genai_client():
     """Configures and returns the Generative AI client from Streamlit secrets."""
     try:
-        # Check if the secret exists
         if "GOOGLE_API_KEY" not in st.secrets:
             st.error("🚨 **Error:** `GOOGLE_API_KEY` not found in Streamlit secrets.")
             st.help("Please add your API key to your Streamlit Cloud 'Secrets' to run this app.")
             st.stop()
-        
-        # The Client() automatically finds the GOOGLE_API_KEY from secrets
         client = genai.Client()
         return client
-        
     except Exception as e:
         st.error(f"An error occurred during client initialization: {e}")
         st.stop()
@@ -55,17 +53,14 @@ def upload_to_file_search_store(client, file_path, file_search_store_name, displ
                 file_search_store_name=file_search_store_name,
                 config={'display_name': display_name},
             )
-
-            # Wait for import to complete with a timeout
             start_time = time.time()
             while not operation.done:
-                if time.time() - start_time > 600: # 10-minute timeout
+                if time.time() - start_time > 600:
                     st.error(f"Timeout: Indexing '{display_name}' took too long.")
                     return None
                 st.toast(f"Processing '{display_name}'... please wait.")
                 time.sleep(5)
                 operation = client.operations.get(operation)
-            
             st.success(f"✅ Successfully indexed '{display_name}'!")
             return operation
         except Exception as e:
@@ -76,7 +71,7 @@ def query_file_search_store(client, store_name, query):
     """Asks a question about the file store and returns the response."""
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash", # Use a supported model
+            model="gemini-2.5-flash",
             contents=[query],
             config=types.GenerateContentConfig(
                 tools=[
@@ -93,38 +88,70 @@ def query_file_search_store(client, store_name, query):
         st.error(f"Error during query: {e}")
         return None
 
-# --- 2. Dummy Analytics Function (for the Dashboard) ---
-def get_analytics_data(file_names):
-    """Generates dummy analytics data for the dashboard."""
-    if not file_names:
-        return None, None
+# --- 2. NEW: Analytics Function ---
+
+def get_document_analytics(client, store_name):
+    """
+    Prompts the model to act as an analyst and extract structured data
+    (countries and UN entities) from the entire document corpus.
+    """
     
-    # Dummy Keywords
-    keywords = ["Ceasefire", "Humanitarian Aid", "Political Dialogue", "Security Council", "Refugees", "Resolution 2254", "Peace Process"]
-    data = {
-        "Keyword": random.sample(keywords, min(5, len(keywords))),
-        "Frequency": [random.randint(5, 50) for _ in range(5)]
+    # This is a "meta-prompt" asking the AI to analyze its own RAG source
+    analytics_prompt = """
+    Analyze all of the provided documents in their entirety.
+    Your task is to act as a UN political analyst.
+    
+    1.  List every country mentioned in the documents.
+    2.  List every United Nations (UN) entity, program, or agency mentioned
+        (e.g., "UNDP", "Security Council", "UNICEF", "DPPA").
+        
+    Return your findings as a single, clean JSON object.
+    The JSON object must have two keys:
+    - "countries": a list of country name strings.
+    - "un_entities": a list of UN entity name strings.
+    
+    Example response:
+    {
+      "countries": ["Syria", "Yemen", "Colombia", "Syria"],
+      "un_entities": ["Security Council", "UNDP", "Security Council"]
     }
-    keyword_df = pd.DataFrame(data).set_index("Keyword")
     
-    # Dummy Stakeholders
-    stakeholders = ["Party A", "Party B", "UN Envoy", "Civil Society Org.", "Neighboring State C"]
-    stakeholder_data = {
-        "Stakeholder": random.sample(stakeholders, min(3, len(stakeholders))),
-        "Mentions": [random.randint(10, 40) for _ in range(3)],
-        "Sentiment": [random.choice(["Positive", "Negative", "Neutral"]) for _ in range(3)]
-    }
-    stakeholder_df = pd.DataFrame(stakeholder_data).set_index("Stakeholder")
+    Do not include any text outside of the JSON object.
+    """
     
-    return keyword_df, stakeholder_df
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[analytics_prompt],
+            config=types.GenerateContentConfig(
+                tools=[
+                    types.Tool(
+                        file_search=types.FileSearch(
+                            file_search_store_names=[store_name]
+                        )
+                    )
+                ]
+            )
+        )
+        
+        # Clean the response to extract only the JSON
+        json_str = response.text.strip().replace("```json", "").replace("```", "")
+        data = json.loads(json_str)
+        return data
+    
+    except json.JSONDecodeError:
+        st.error("Error: Failed to decode analytics data from the model. The model may have returned non-JSON text.")
+        st.code(response.text) # Show what the model returned
+        return None
+    except Exception as e:
+        st.error(f"Error during analytics query: {e}")
+        return None
 
 # --- 3. Streamlit App UI ---
 
-# 
 st.title("🇺🇳 Good Offices AI Analyst")
 st.markdown("A 'Diplomatic Pulse' dashboard powered by Gemini File Search.")
 
-# --- Initialize Client and File Store ---
 client = get_genai_client()
 
 if "file_search_store" not in st.session_state:
@@ -133,6 +160,8 @@ if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = []
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "analytics_results" not in st.session_state:
+    st.session_state.analytics_results = None
 
 file_search_store = st.session_state.file_search_store
 
@@ -151,16 +180,12 @@ with st.sidebar:
     if uploaded_files:
         for uploaded_file in uploaded_files:
             if uploaded_file.name not in st.session_state.uploaded_files:
-                # Save to a temp file to get a persistent path
                 with tempfile.NamedTemporaryFile(delete=False, suffix=f"-{uploaded_file.name}") as temp_file:
                     temp_file.write(uploaded_file.getvalue())
                     temp_file_path = temp_file.name
-
-                # Upload and index the file
                 if upload_to_file_search_store(client, temp_file_path, file_search_store.name, uploaded_file.name):
                     st.session_state.uploaded_files.append(uploaded_file.name)
-                
-                # Clean up the temporary file
+                    st.session_state.analytics_results = None # Invalidate old analytics
                 os.unlink(temp_file_path)
     
     st.divider()
@@ -188,31 +213,24 @@ tab1, tab2 = st.tabs(["💬 Document Chat (RAG)", "📊 Analytics Dashboard"])
 with tab1:
     st.subheader("Query Your Document Corpus")
 
-    # Display chat messages from history
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-            if "citations" in message:
+            if "citations" in message and message["citations"]:
                 with st.expander("Show Sources (from your documents)"):
                     for citation in message["citations"]:
                         st.info(f"**From '{citation['file_name']}' (Snippet):**\n\n> {citation['snippet']}")
-            # Add this check for older messages that might not have citations
-            elif message["role"] == "assistant" and "citations" not in message:
-                st.caption("ℹ️ This response was based on the model's general knowledge.")
+            elif message["role"] == "assistant" and ("citations" not in message or not message["citations"]):
+                st.caption("ℹ️ This response was grounded in your documents, but no specific snippet was cited.")
 
-
-    # The chat input bar
     if prompt := st.chat_input("Ask a question based *only* on the uploaded documents..."):
         if not st.session_state.uploaded_files:
             st.info("Please upload at least one document in the sidebar to start the chat.")
         else:
-            # Add user message to history
             st.session_state.messages.append({"role": "user", "content": prompt})
-            # Display user message
             with st.chat_message("user"):
                 st.markdown(prompt)
 
-            # Get model response
             with st.chat_message("assistant"):
                 with st.spinner("Searching documents and formulating answer..."):
                     response = query_file_search_store(client, file_search_store.name, prompt)
@@ -220,8 +238,6 @@ with tab1:
                     if response:
                         response_text = response.text
                         citations = []
-                        
-                        # --- 1. Check for and extract citations ---
                         try:
                             grounding_meta = response.candidates[0].grounding_metadata
                             if grounding_meta.search_quotes:
@@ -231,63 +247,85 @@ with tab1:
                                         "snippet": quote.text_snippet
                                     })
                         except (AttributeError, IndexError):
-                            pass # No citations found
-
-                        # --- 2. Display the response ---
+                            pass
+                        
                         st.markdown(response_text)
                         
-                        # --- 3. Display sources OR a general knowledge notice ---
                         if citations:
                             with st.expander("Show Sources (from your documents)"):
                                 for citation in citations:
                                     st.info(f"**From '{citation['file_name']}' (Snippet):**\n\n> {citation['snippet']}")
-                            # Add to session state
-                            st.session_state.messages.append({
-                                "role": "assistant", 
-                                "content": response_text, 
-                                "citations": citations
-                            })
                         else:
-                            st.caption("ℹ️ This response is based on the model's general knowledge.")
-                            st.session_state.messages.append({
-                                "role": "assistant", 
-                                "content": response_text
-                            })
+                            st.caption("ℹ️ This response was grounded in your documents, but no specific snippet was cited.")
+                        
+                        st.session_state.messages.append({
+                            "role": "assistant", 
+                            "content": response_text, 
+                            "citations": citations
+                        })
                     else:
                         st.error("Failed to get a response from the model.")
 
-# --- Tab 2: Analytics Dashboard ---
+# --- Tab 2: Analytics Dashboard (NOW FUNCTIONAL) ---
 with tab2:
     st.subheader("Automated 'Diplomatic Pulse' Analytics")
 
     if not st.session_state.uploaded_files:
         st.info("Upload documents in the sidebar to generate analytics.")
     else:
-        st.markdown("This dashboard provides an automated summary of your document corpus. *(This is a demo concept; a real app would use another Gemini call to extract entities)*.")
+        st.markdown("Click the button to run a full analysis of the document corpus. The AI will read all documents to extract countries and UN entities.")
         
-        keyword_df, stakeholder_df = get_analytics_data(st.session_state.uploaded_files)
+        if st.button("Generate Corpus Analytics", type="primary", use_container_width=True):
+            with st.spinner("AI Analyst is reading all documents... this may take a moment."):
+                st.session_state.analytics_results = get_document_analytics(client, file_search_store.name)
         
-        if keyword_df is not None:
-            col1, col2 = st.columns(2)
+        st.divider()
+
+        # Display the results once they are in the session state
+        if st.session_state.analytics_results:
+            data = st.session_state.analytics_results
             
-            with col1:
-                st.subheader("Key Topic Frequency")
-                st.bar_chart(keyword_df["Frequency"])
-            
-            with col2:
-                st.subheader("Stakeholder Mentions")
-                st.dataframe(stakeholder_df, use_container_width=True)
+            try:
+                # --- 1. UN Entity Frequency Chart ---
+                st.subheader("UN Entity Mentions")
+                un_entities = data.get("un_entities", [])
+                if un_entities:
+                    entity_df = pd.Series(un_entities).value_counts().to_frame('Mentions')
+                    st.bar_chart(entity_df)
+                else:
+                    st.info("No UN entities found in the documents.")
                 
-            st.divider()
-            st.subheader("Conceptual: Stakeholder Relationship Map")
-            st.graphviz_chart('''
-                digraph {
-                    rankdir=LR;
-                    "UN Envoy" -> "Party A" [label = " negotiates"];
-                    "UN Envoy" -> "Party B" [label = " negotiates"];
-                    "Party A" -> "Party B" [label = " ceasefire"];
-                    "Neighboring State C" -> "Party A" [label = " supports"];
-                    "Civil Society Org." -> "UN Envoy" [label = " advises"];
-                }
-            ''')
-            st.caption("This graph is a static demo. A full implementation would use AI to extract relationships from your text.")
+                # --- 2. Country Mentions Map ---
+                st.subheader("Country Mentions (Geographic Map)")
+                countries = data.get("countries", [])
+                if countries:
+                    # Use pandas to count frequencies
+                    country_df = pd.Series(countries).value_counts().to_frame('Mentions').reset_index()
+                    country_df.columns = ['Country', 'Mentions']
+                    
+                    # Convert country names to ISO-3 codes for Plotly
+                    cc = coco.CountryConverter()
+                    country_df['iso_alpha'] = country_df['Country'].apply(
+                        lambda x: cc.convert(names=x, to='ISO3')
+                    )
+                    
+                    # Create the choropleth map
+                    fig = px.choropleth(
+                        country_df,
+                        locations="iso_alpha",
+                        color="Mentions",
+                        hover_name="Country",
+                        color_continuous_scale=px.colors.sequential.Plasma,
+                        title="Geographic Distribution of Country Mentions"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No countries found in the documents.")
+
+            except Exception as e:
+                st.error("An error occurred while trying to display the analytics.")
+                st.write(e)
+                st.json(st.session_state.analytics_results) # Show the raw data for debugging
+
+        elif st.session_state.analytics_results is None and not st.session_state.uploaded_files:
+             st.info("Please upload documents and click 'Generate Corpus Analytics'.")
