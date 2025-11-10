@@ -20,15 +20,16 @@ st.set_page_config(
 def get_genai_client():
     """Configures and returns the Generative AI client from Streamlit secrets."""
     try:
-        # Get API key from Streamlit secrets
-        api_key = st.secrets["GOOGLE_API_KEY"]
-        genai.configure(api_key=api_key)
+        # Check if the secret exists
+        if "GOOGLE_API_KEY" not in st.secrets:
+            st.error("🚨 **Error:** `GOOGLE_API_KEY` not found in Streamlit secrets.")
+            st.help("Please add your API key to your Streamlit Cloud 'Secrets' to run this app.")
+            st.stop()
+        
+        # The Client() automatically finds the GOOGLE_API_KEY from secrets
         client = genai.Client()
         return client
-    except KeyError:
-        st.error("🚨 **Error:** `GOOGLE_API_KEY` not found in Streamlit secrets.")
-        st.help("Please add your API key to your Streamlit Cloud 'Secrets' to run this app.")
-        st.stop()
+        
     except Exception as e:
         st.error(f"An error occurred during client initialization: {e}")
         st.stop()
